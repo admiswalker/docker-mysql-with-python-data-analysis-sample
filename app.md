@@ -113,7 +113,7 @@ drop table user_body_temperature;
 1. 最新の日付を取得する
    - クエリ
      ```sql
-     select max(registration_date) from user_body_temperature;
+     select max(registration_date) from test.user_body_temperature;
      ```
    - 実行結果
      ```console
@@ -126,8 +126,8 @@ drop table user_body_temperature;
 2. 「1.」で取得した日付のレコード一覧を取得する
    - クエリ
      ```sql
-     select * from user_body_temperature
-     where registration_date = (select max(registration_date) from user_body_temperature);
+     select * from test.user_body_temperature
+     where registration_date = (select max(registration_date) from test.user_body_temperature);
      ```
    - 実行結果
      ```console
@@ -146,8 +146,8 @@ drop table user_body_temperature;
      ```sql
      select * from (
          select *, row_number() over (partition by user_id order by measuring_date desc) row_num
-         from user_body_temperature
-         where registration_date = (select max(registration_date) from user_body_temperature)
+         from test.user_body_temperature
+         where registration_date = (select max(registration_date) from test.user_body_temperature)
      ) row_num
      where row_num = 1;
      ```
@@ -163,65 +163,114 @@ drop table user_body_temperature;
      |   8 |     333 | 2022-09-06     |             37.5 | 2022-09-15        |       1 |
      +-----+---------+----------------+------------------+-------------------+---------+
      ```
-4. 「3.」で取得したクエリの内，体温が 38 ℃を超える高熱のユーザのレコードを取得する
+3. 最新レコードの内，各 user_id の measuring_date が「2番新しいもの」を取得する
    - クエリ
      ```sql
      select * from (
          select *, row_number() over (partition by user_id order by measuring_date desc) row_num
-         from user_body_temperature
-         where (
-            registration_date = (select max(registration_date) from user_body_temperature)
-            and body_temperature >= 38
-         )
+         from test.user_body_temperature
+         where registration_date = (select max(registration_date) from test.user_body_temperature)
      ) row_num
-     where row_num = 1;
+     where row_num = 2;
      ```
    - 実行結果
      ```console
      +-----+---------+----------------+------------------+-------------------+---------+
      | idx | user_id | measuring_date | body_temperature | registration_date | row_num |
      +-----+---------+----------------+------------------+-------------------+---------+
-     |   3 |     111 | 2022-09-01     |             38.5 | 2022-09-15        |       1 |
+     |   2 |     111 | 2022-08-01     |             36.5 | 2022-09-15        |       2 |
+     |   7 |     333 | 2022-09-01     |             37.5 | 2022-09-15        |       2 |
      +-----+---------+----------------+------------------+-------------------+---------+
      ```
-
-
----
-
-
-
-
-
-
-
-
-
-
-
-
-2. 「1.」の実行結果より，最新のレコードの日付が分かった．最新のレコードの日付から，measuring_date を絞り込む．
+4. 「2.」と「3.」の結果を inner join する（前回値の無いものは無視する）
+   - クエリ
      ```sql
-     select * from (
-         select *, row_number() over (partition by user_id order by registration_date desc) row_num from user_body_temperature
-     ) row_num
-     where row_num = 1;
+     select
+        user_id,
+        measuring_date,
+        body_temperature,
+        measuring_date_prev,
+        body_temperature_prev,
+        registration_date
+     from (
+        select 
+            user_id,
+            measuring_date,
+            body_temperature,
+            registration_date
+        from (
+            select *, row_number() over (partition by user_id order by measuring_date desc) row_num
+            from test.user_body_temperature
+            where registration_date = (select max(registration_date) from test.user_body_temperature)
+        ) row_num where row_num = 1
+     ) lhs
+     join (
+        select 
+            user_id as user_id_prev,
+            measuring_date as measuring_date_prev,
+            body_temperature as body_temperature_prev,
+            registration_date as registration_date_prev
+        from (
+            select *, row_number() over (partition by user_id order by measuring_date desc) row_num
+            from test.user_body_temperature
+            where registration_date = (select max(registration_date) from test.user_body_temperature)
+        ) row_num where row_num = 2
+     ) rhs
+     on lhs.user_id = rhs.user_id_prev;
      ```
-
-- クエリ
-  ```sql
-  select * from (
-      select *, row_number() over (partition by user_id order by registration_date desc) row_num from user_body_temperature
-  ) row_num
-  where row_num = 1;
-  ```
-- 実行結果
-  ```console
-  +-----+---------+----------------+------------------+-------------------+---------+
-  | idx | user_id | measuring_date | body_temperature | registration_date | row_num |
-  +-----+---------+----------------+------------------+-------------------+---------+
-  |   3 |     111 | 2022-09-01     |             38.5 | 2022-09-15        |       1 |
-  |   6 |     222 | 2022-09-01     |             37.5 | 2022-09-15        |       1 |
-  +-----+---------+----------------+------------------+-------------------+---------+
-  ```
-
+   - 実行結果
+     ```console
+     +---------+----------------+------------------+---------------------+-----------------------+-------------------+
+     | user_id | measuring_date | body_temperature | measuring_date_prev | body_temperature_prev | registration_date |
+     +---------+----------------+------------------+---------------------+-----------------------+-------------------+
+     |     111 | 2022-09-01     |             38.5 | 2022-08-01          |                  36.5 | 2022-09-15        |
+     |     333 | 2022-09-06     |             37.5 | 2022-09-01          |                  37.5 | 2022-09-15        |
+     +---------+----------------+------------------+---------------------+-----------------------+-------------------+
+     ```
+5. 前回値との差分を計算する
+   - クエリ
+     ```sql
+     select
+        user_id,
+        measuring_date,
+        body_temperature,
+        measuring_date_prev,
+        body_temperature_prev,
+        (body_temperature - body_temperature_prev) as diff,
+        registration_date
+     from (
+        select 
+            user_id,
+            measuring_date,
+            body_temperature,
+            registration_date
+        from (
+            select *, row_number() over (partition by user_id order by measuring_date desc) row_num
+            from test.user_body_temperature
+            where registration_date = (select max(registration_date) from test.user_body_temperature)
+        ) row_num where row_num = 1
+     ) lhs
+     join (
+        select 
+            user_id as user_id_prev,
+            measuring_date as measuring_date_prev,
+            body_temperature as body_temperature_prev,
+            registration_date as registration_date_prev
+        from (
+            select *, row_number() over (partition by user_id order by measuring_date desc) row_num
+            from test.user_body_temperature
+            where registration_date = (select max(registration_date) from test.user_body_temperature)
+        ) row_num where row_num = 2
+     ) rhs
+     on lhs.user_id = rhs.user_id_prev;
+     ```
+   - 実行結果
+     ```console
+     +---------+----------------+------------------+---------------------+-----------------------+------+-------------------+
+     | user_id | measuring_date | body_temperature | measuring_date_prev | body_temperature_prev | diff | registration_date |
+     +---------+----------------+------------------+---------------------+-----------------------+------+-------------------+
+     |     111 | 2022-09-01     |             38.5 | 2022-08-01          |                  36.5 |    2 | 2022-09-15        |
+     |     333 | 2022-09-06     |             37.5 | 2022-09-01          |                  37.5 |    0 | 2022-09-15        |
+     +---------+----------------+------------------+---------------------+-----------------------+------+-------------------+
+     ```
 
